@@ -937,4 +937,233 @@ def render_two_cut_scene(scene, idx, total_scenes, badge, sfx_library):
     if vid_file:
         media1, is_vid1 = vid_file, True
     else:
-        media1 = fetch_exact_scene_photo(
+        media1 = fetch_exact_scene_photo(q1, f"photo_{idx}_1.jpg", pref=pref)
+        is_vid1 = False
+
+    media2 = None
+    is_vid2 = False
+    if idx % 2 == 1 and GIPHY_API_KEY:
+        g_clip = fetch_giphy_mp4(q2, f"giphy_{idx}_2.mp4")
+        if g_clip:
+            media2, is_vid2 = g_clip, True
+
+    if not media2:
+        media2 = fetch_exact_scene_photo(q2, f"photo_{idx}_2.jpg", pref=pref)
+        is_vid2 = False
+
+    ov1 = create_burned_hud_overlay(scene.get("caption_part1", "KHUDAWAND KA KALAM"), badge, act_text, idx, total_scenes, 1)
+    ov2 = create_burned_hud_overlay(scene.get("caption_part2", "ZINDAGI KI RAAT"), badge, act_text, idx, total_scenes, 2)
+
+    sub1 = f"sub_{idx}_1.mp4"
+    sub2 = f"sub_{idx}_2.mp4"
+    prepare_visual_subclip(media1, is_vid1, ov1, half_dur, 0, sub1)
+    prepare_visual_subclip(media2, is_vid2, ov2, rem_dur, 1, sub2)
+
+    list_file = f"scene_list_{idx}.txt"
+    with open(list_file, "w") as f:
+        f.write(f"file '{sub1}'\nfile '{sub2}'\n")
+
+    scene_out = f"scene_final_{idx}.mp4"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", list_file,
+        "-i", audio_path,
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "copy", "-shortest",
+        scene_out
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for tmp in [sub1, sub2, ov1, ov2]:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+    return scene_out
+
+
+def prepare_bgm_file():
+    """Synthesizes a warm, sacred, meditative orchestral chord pad in pure Python so it evokes deep reverence."""
+    return write_synthesized_wav(
+        "bgm_sacred_pad.wav", 12.0,
+        lambda t, d: (
+            0.22 * math.sin(2.0 * math.pi * 110.0 * t)
+            + 0.16 * math.sin(2.0 * math.pi * 164.81 * t)
+            + 0.12 * math.sin(2.0 * math.pi * 220.0 * t) * (0.65 + 0.35 * math.sin(2.0 * math.pi * (t / d)))
+            + 0.08 * math.sin(2.0 * math.pi * 277.18 * t) * math.sin(math.pi * (t / d))
+        )
+    )
+
+
+def build_full_video(script_data):
+    scenes = script_data["scenes"]
+    badge = script_data.get("category_badge", "YESU MASIH KA PAIGHAM")
+    sfx_library = generate_cinematic_sfx_library()
+    scene_files = []
+
+    for idx, scene in enumerate(scenes):
+        print(f"🎬 Scene {idx+1}/{len(scenes)} [{scene.get('act', 'KALAM')}]: '{scene['caption_part1']} | {scene['caption_part2']}'")
+        s_file = render_two_cut_scene(scene, idx, len(scenes), badge, sfx_library)
+        scene_files.append(s_file)
+
+    with open("master_concat.txt", "w") as f:
+        for sf in scene_files:
+            f.write(f"file '{sf}'\n")
+
+    raw_output = "raw_reel.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", "master_concat.txt",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        raw_output
+    ], check=True)
+
+    total_vid_dur = get_audio_duration(raw_output)
+    print(f"⏱️ Total Documentary Runtime: {round(total_vid_dur / 60.0, 2)} minutes ({int(total_vid_dur)} seconds)")
+
+    print("🎵 Mixing Sacred Orchestral Background Pad...")
+    final_output = "final_reel.mp4"
+    try:
+        bgm_loop = prepare_bgm_file()
+        mix_cmd = [
+            "ffmpeg", "-y",
+            "-i", raw_output,
+            "-stream_loop", "-1", "-i", bgm_loop,
+            "-filter_complex", "[1:a]volume=0.14[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[a]",
+            "-map", "0:v", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-maxrate", "2500k", "-bufsize", "5000k",
+            "-c:a", "aac", "-b:a", "192k",
+            final_output
+        ]
+        subprocess.run(mix_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return final_output
+    except Exception as e:
+        print(f"BGM mix fallback note: {e}")
+
+    subprocess.run(["cp", raw_output, final_output], check=False)
+    return final_output
+
+
+# =====================================================================
+# FACEBOOK & TELEGRAM PUBLISHING
+# =====================================================================
+def resolve_fb_page_credentials():
+    page_id = FB_PAGE_ID
+    token = FB_ACCESS_TOKEN
+
+    m = re.search(r'(\d{8,})', page_id)
+    if m:
+        page_id = m.group(1)
+
+    try:
+        r = requests.get(
+            "https://graph.facebook.com/v20.0/me/accounts",
+            params={"access_token": token},
+            timeout=15
+        )
+        if r.status_code == 200:
+            pages = r.json().get("data", [])
+            if pages:
+                for p in pages:
+                    if p.get("id") == page_id or p.get("name", "").lower() in page_id.lower():
+                        print(f"  [✓] Matched Facebook Page: {p.get('name')} ({p.get('id')})")
+                        return p.get("id"), p.get("access_token", token)
+                first_page = pages[0]
+                print(f"  [✓] Using Default Facebook Page: {first_page.get('name')} ({first_page.get('id')})")
+                return first_page.get("id"), first_page.get("access_token", token)
+    except Exception as e:
+        print(f"  [!] FB account check note: {e}")
+
+    return page_id, token
+
+
+def upload_to_facebook(video_path, script_data):
+    if not FB_ACCESS_TOKEN or not FB_PAGE_ID:
+        print("⚠️ Facebook credentials missing in environment variables.")
+        return False, "FB Secrets missing"
+
+    page_id, page_token = resolve_fb_page_credentials()
+    print(f"🚀 Uploading 2-Minute Spiritual Documentary to Facebook Page ID: {page_id}...")
+    url = f"https://graph-video.facebook.com/v20.0/{page_id}/videos"
+
+    title = script_data.get("title", "Khudawand Yesu Masih Ka Zinda Paigham")
+    tagline = script_data.get("tagline", "Main Khudawand Yesu Masih tum se hamkalam hota hoon!")
+    description = script_data.get("description", "Rozana Khudawand Yesu Masih ke zinda kalam aur roohani sukoon ke liye page ko follow karein!")
+    hashtags = script_data.get("hashtags", "#KhudawandYesuMasih #PakistaniChristians #UrduBible #YesuMasih")
+
+    full_post_description = (
+        f"{title}\n\n"
+        f"✝️ {tagline}\n\n"
+        f"📖 {description}\n\n"
+        f"🙏 Is paigham ko apne Masihi behan bhaiyon ke saath zaroor share karein! Amen.\n\n"
+        f"{hashtags}"
+    )
+
+    try:
+        with open(video_path, "rb") as vf:
+            payload = {
+                "access_token": page_token,
+                "title": title,
+                "description": full_post_description
+            }
+            files = {"source": vf}
+            resp = requests.post(url, data=payload, files=files, timeout=360)
+            print("Facebook API Status:", resp.status_code, resp.text)
+            if resp.status_code == 200 and "id" in resp.json():
+                vid_id = resp.json()["id"]
+                return True, f"Published on FB! (Video ID: {vid_id})"
+            err_msg = resp.json().get("error", {}).get("message", resp.text[:140])
+            return False, f"FB Error: {err_msg}"
+    except Exception as e:
+        print(f"Facebook Upload Exception: {e}")
+        return False, str(e)[:120]
+
+
+def send_to_telegram(video_path, script_data, fb_ok, fb_msg):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing.")
+        return
+
+    print("📲 Uploading 2-Min Spiritual Documentary & Status Report to Telegram...")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    fb_status_line = f"✅ Facebook Auto-Post: {fb_msg}" if fb_ok else f"⚠️ Facebook Auto-Post: {fb_msg}"
+
+    caption = (
+        f"🕊️ {script_data.get('title')}\n\n"
+        f"✝️ Tagline:\n{script_data.get('tagline')}\n\n"
+        f"📖 Description:\n{script_data.get('description')}\n\n"
+        f"🏷️ Tags:\n{script_data.get('hashtags')}\n\n"
+        f"🌌 Media Sources: NASA + Pixabay + GIPHY\n"
+        f"{fb_status_line}"
+    )[:1000]
+
+    with open(video_path, "rb") as vf:
+        resp = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "supports_streaming": True},
+            files={"video": vf},
+            timeout=240
+        )
+        print("Telegram Upload Status:", resp.status_code, resp.text[:200])
+
+    if resp.status_code != 200:
+        print("Retrying Telegram upload without caption...")
+        with open(video_path, "rb") as vf:
+            requests.post(
+                url,
+                data={"chat_id": TELEGRAM_CHAT_ID},
+                files={"video": vf},
+                timeout=240
+            )
+
+
+if __name__ == "__main__":
+    data = generate_infinite_documentary_script()
+    print("Documentary Title:", data.get("title"))
+    final_vid = build_full_video(data)
+    fb_success, fb_info = upload_to_facebook(final_vid, data)
+    send_to_telegram(final_vid, data, fb_success, fb_info)
